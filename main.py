@@ -3,7 +3,7 @@
 Forecasts a big game launch's Twitch category viewers for hours 2-24 of
 its release day, given everything recorded up to the end of hour 1.
 
-Method (leave-one-out pinball loss 0.403 over 148 historical launches,
+Method (leave-one-out pinball loss 0.398 over 148 historical launches,
 vs 0.930 for a flat-median forecaster): every past launch in the case's
 `comparables` contributes its release-day curve normalized by its own
 hour-1 count, giving a distribution of log-ratios ln(viewers_h /
@@ -30,7 +30,7 @@ MAG_W = 1.25
 BLEND = 0.35
 SD_FLOOR = 0.12
 SD_CAP = 1.1
-UNLOCK_MATCH_BOOST = 1.6
+UNLOCK_MATCH_BOOST = 2.5
 
 
 def parse_ts(s):
