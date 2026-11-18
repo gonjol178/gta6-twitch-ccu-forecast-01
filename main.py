@@ -3,17 +3,23 @@
 Forecasts a big game launch's Twitch category viewers for hours 2-24 of
 its release day, given everything recorded up to the end of hour 1.
 
-Method (leave-one-out pinball loss 0.398 over 148 historical launches,
+Method (leave-one-out pinball loss 0.383 over 148 historical launches,
 vs 0.930 for a flat-median forecaster): every past launch in the case's
 `comparables` contributes its release-day curve normalized by its own
 hour-1 count, giving a distribution of log-ratios ln(viewers_h /
 viewers_1) per hour. Comparables are weighted by how close their hour-1
-audience is to this launch's (exp(-1.25 * |ln ratio of hour-1 counts|))
-and by whether their unlock pattern matches this launch's (rolling
+audience is to this launch's (exp(-1.25 * |ln ratio of hour-1 counts|)),
+by whether their unlock pattern matches this launch's (rolling
 midnight-local vs one global moment, read from the case notes and each
-comparable's unlock text). Each hour's five quantiles blend the weighted
-empirical quantiles of the log-ratios with a weighted normal fit
-(0.35 / 0.65), then scale by this launch's hour-1 print.
+comparable's unlock text; match boost 6), and by platform-family
+similarity (Jaccard overlap of the platform families named in the case
+notes' release clause and each comparable's platform list, raised to
+the 3rd power with a 0.35 floor share). Each hour's five quantiles blend
+the weighted empirical quantiles of the log-ratios with a weighted
+normal fit; the empirical share starts at 0.20 in hour 2 and decays
+linearly to 0 by hour 24, and the normal fit's spread shrinks linearly
+by up to 30% over the same span. The blend is then scaled by this
+launch's hour-1 print.
 
 Standard library only, no network, deterministic; runs in well under a
 second per case.
@@ -22,15 +28,19 @@ second per case.
 import json
 import math
 import os
+import re
 from datetime import datetime, timedelta
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = {0.05: -1.644854, 0.25: -0.674490, 0.5: 0.0, 0.75: 0.674490, 0.95: 1.644854}
 MAG_W = 1.25
-BLEND = 0.35
+BLEND = 0.20
+BLEND_SLOPE = -0.20
 SD_FLOOR = 0.12
 SD_CAP = 1.1
-UNLOCK_MATCH_BOOST = 2.5
+SD_SLOPE = -0.30
+UNLOCK_MATCH_BOOST = 6
+PLAT_W = 3.0
 
 
 def parse_ts(s):
@@ -50,6 +60,36 @@ def day_curve(comp):
 def is_rolling_text(text):
     u = (text or '').lower()
     return 'midnight' in u and ('rolling' in u or 'local' in u)
+
+
+def plat_families(text):
+    """Coarse platform families named in a platform list or release clause."""
+    s = (text or '').lower()
+    fams = set()
+    if re.search(r'\bpc\b', s):
+        fams.add('PC')
+    if 'playstation' in s or re.search(r'\bps\d?\b', s):
+        fams.add('PS')
+    if 'xbox' in s or 'xb1' in s:
+        fams.add('XB')
+    if 'switch' in s:
+        fams.add('SW')
+    if 'stadia' in s:
+        fams.add('ST')
+    return fams
+
+
+def target_platforms(notes):
+    """Platform families of the target launch, from the notes' release
+    clause (the text before the unlock description, parentheticals —
+    e.g. a later PC port note — removed). Empty when unparseable, which
+    disables platform weighting."""
+    s = notes or ''
+    cut = s.lower().find('real unlock')
+    if cut >= 0:
+        s = s[:cut]
+    s = re.sub(r'\([^)]*\)', ' ', s)
+    return plat_families(s)
 
 
 def wquantile(sorted_pairs, tau):
@@ -75,6 +115,7 @@ def forecast(case):
     ln_v1 = math.log(v1)
     game_name = (case.get('game') or {}).get('name', '')
     target_rolling = is_rolling_text(case.get('notes'))
+    target_plats = target_platforms(case.get('notes'))
     rows = []
     for comp in case['comparables']:
         if comp['name'] == game_name:
@@ -89,6 +130,11 @@ def forecast(case):
         w = math.exp(-MAG_W * abs(math.log(c1) - ln_v1))
         if is_rolling_text(comp.get('unlock')) == target_rolling:
             w *= UNLOCK_MATCH_BOOST
+        if target_plats:
+            plats = plat_families(comp.get('platforms'))
+            union = len(plats | target_plats)
+            jac = len(plats & target_plats) / union if union else 0.0
+            w *= (0.35 + 0.65 * jac) ** PLAT_W
         rows.append((ratios, w))
     out = []
     for h in range(2, 25):
@@ -99,10 +145,11 @@ def forecast(case):
             tot = sum(w for _, w in pairs)
             mean = sum(v * w for v, w in pairs) / tot
             var = sum(w * (v - mean) ** 2 for v, w in pairs) / tot
-            sd = min(max(math.sqrt(var), SD_FLOOR), SD_CAP)
+            sd = min(max(math.sqrt(var) * (1 + SD_SLOPE * (h - 2) / 22.0), SD_FLOOR), SD_CAP)
+            blend_h = min(max(BLEND + BLEND_SLOPE * (h - 2) / 22.0, 0.0), 1.0)
             qs = []
             for tau in LEVELS:
-                q = BLEND * wquantile(pairs, tau) + (1 - BLEND) * (mean + Z[tau] * sd)
+                q = blend_h * wquantile(pairs, tau) + (1 - blend_h) * (mean + Z[tau] * sd)
                 qs.append(min(max(math.exp(ln_v1 + q), 0.01), 1e9))
             for i in range(1, 5):
                 qs[i] = max(qs[i], qs[i - 1])
